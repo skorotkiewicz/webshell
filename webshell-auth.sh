@@ -269,6 +269,7 @@ setup_cgroup() {
     
     # Set resource limits (only if files exist)
     [ -f "$cgroup_path/memory.max" ] && echo "$MEMORY_LIMIT" > "$cgroup_path/memory.max" 2>/dev/null
+    [ -f "$cgroup_path/memory.swap.max" ] && echo "0" > "$cgroup_path/memory.swap.max" 2>/dev/null  # Disable swap
     [ -f "$cgroup_path/cpu.max" ] && echo "$CPU_QUOTA" > "$cgroup_path/cpu.max" 2>/dev/null
     [ -f "$cgroup_path/pids.max" ] && echo "$PIDS_LIMIT" > "$cgroup_path/pids.max" 2>/dev/null
     

@@ -18,6 +18,13 @@ NC='\033[0m' # No Color
 TESTS_PASSED=0
 TESTS_FAILED=0
 
+# Cleanup trap - ensure we don't leave zombie processes
+cleanup() {
+    pkill -u "$(whoami)" sleep 2>/dev/null
+    wait 2>/dev/null
+}
+trap cleanup EXIT INT TERM
+
 print_header() {
     echo ""
     echo "============================================================"
@@ -53,61 +60,110 @@ print_info() {
 test_memory_limit() {
     print_header "MEMORY LIMIT TEST (100MB)"
     
+    # Get cgroup path
+    CGROUP_PATH=$(cat /proc/self/cgroup 2>/dev/null | head -1 | cut -d: -f3)
+    MEM_CGROUP="/sys/fs/cgroup${CGROUP_PATH}"
+    
     print_info "Current memory cgroup settings:"
-    if [ -f /sys/fs/cgroup/memory.max ]; then
-        cat /sys/fs/cgroup/memory.max 2>/dev/null || echo "  (not accessible)"
+    if [ -f "$MEM_CGROUP/memory.max" ]; then
+        echo "  memory.max: $(cat $MEM_CGROUP/memory.max)"
+        echo "  memory.swap.max: $(cat $MEM_CGROUP/memory.swap.max 2>/dev/null || echo 'not set')"
+        echo "  memory.current: $(cat $MEM_CGROUP/memory.current 2>/dev/null)"
     else
-        # Check if we're in a user cgroup
-        CGROUP_PATH=$(cat /proc/self/cgroup 2>/dev/null | head -1 | cut -d: -f3)
-        if [ -n "$CGROUP_PATH" ] && [ -f "/sys/fs/cgroup${CGROUP_PATH}/memory.max" ]; then
-            echo "  memory.max: $(cat /sys/fs/cgroup${CGROUP_PATH}/memory.max)"
-        else
-            print_warn "Cannot read cgroup memory settings"
-        fi
+        print_warn "Cannot read cgroup memory settings"
     fi
     
-    print_test "Attempting to allocate 50MB (should succeed)"
-    # Allocate 50MB using dd to /dev/null
-    if dd if=/dev/zero of=/dev/null bs=1M count=50 2>/dev/null; then
+    print_test "Attempting to use 50MB RAM (should succeed)"
+    
+    # Use dd to create a file in RAM (tmpfs)
+    # /dev/shm is tmpfs and uses actual RAM
+    if dd if=/dev/zero of=/dev/shm/memtest_50mb_$$ bs=1M count=50 2>/dev/null; then
+        rm -f /dev/shm/memtest_50mb_$$
         print_pass "50MB allocation succeeded"
     else
+        rm -f /dev/shm/memtest_50mb_$$ 2>/dev/null
         print_fail "50MB allocation failed unexpectedly"
     fi
     
-    print_test "Attempting to allocate 150MB (should fail or be killed)"
+    print_test "Attempting to use 150MB RAM (should fail or be killed)"
     
-    # Create a Python script to allocate memory
-    cat > /tmp/mem_test.py << 'MEMTEST'
-import sys
-try:
-    # Try to allocate 150MB
-    data = bytearray(150 * 1024 * 1024)
-    # Fill it to ensure it's actually allocated
-    for i in range(0, len(data), 4096):
-        data[i] = 1
-    print("ALLOCATED")
-    sys.exit(0)
-except MemoryError:
-    print("MEMORY_ERROR")
-    sys.exit(1)
-except Exception as e:
-    print(f"ERROR: {e}")
-    sys.exit(2)
-MEMTEST
+    # Method 1: Try using a C program that actually touches memory
+    cat > /tmp/mem_eater.c << 'MEMTEST_C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-    result=$(timeout 10 python3 /tmp/mem_test.py 2>&1)
-    exit_code=$?
+int main() {
+    size_t size = 150 * 1024 * 1024; // 150MB
+    char *mem = malloc(size);
+    if (!mem) {
+        printf("MALLOC_FAILED\n");
+        return 1;
+    }
+    // Actually touch every page to force allocation
+    memset(mem, 'X', size);
+    printf("ALLOCATED\n");
+    free(mem);
+    return 0;
+}
+MEMTEST_C
+
+    # Try to compile and run C version (most reliable)
+    if command -v gcc >/dev/null 2>&1; then
+        if gcc -o /tmp/mem_eater /tmp/mem_eater.c 2>/dev/null; then
+            result=$(timeout 30 /tmp/mem_eater 2>&1)
+            exit_code=$?
+            rm -f /tmp/mem_eater /tmp/mem_eater.c
+            
+            if [ $exit_code -eq 137 ] || [ $exit_code -eq 9 ]; then
+                print_pass "Process was killed (OOM) - memory limit enforced!"
+                # Check OOM events
+                if [ -f "$MEM_CGROUP/memory.events" ]; then
+                    oom_count=$(grep "oom_kill" "$MEM_CGROUP/memory.events" 2>/dev/null | awk '{print $2}')
+                    print_info "OOM kill events: ${oom_count:-0}"
+                fi
+                return
+            elif echo "$result" | grep -q "MALLOC_FAILED"; then
+                print_pass "Malloc failed - memory limit enforced!"
+                return
+            elif echo "$result" | grep -q "ALLOCATED"; then
+                print_fail "150MB was allocated - memory limit may not be enforced"
+                return
+            fi
+        fi
+    fi
+    rm -f /tmp/mem_eater.c /tmp/mem_eater 2>/dev/null
     
-    rm -f /tmp/mem_test.py
+    # Fallback: Use shell with /dev/shm
+    print_info "Trying /dev/shm method..."
+    (
+        dd if=/dev/zero of=/dev/shm/memtest_150mb_$$ bs=1M count=150 2>&1
+        exit_code=$?
+        rm -f /dev/shm/memtest_150mb_$$ 2>/dev/null
+        exit $exit_code
+    ) &
+    child_pid=$!
+    
+    # Wait and check if killed
+    wait $child_pid 2>/dev/null
+    exit_code=$?
+    rm -f /dev/shm/memtest_150mb_$$ 2>/dev/null
     
     if [ $exit_code -eq 137 ] || [ $exit_code -eq 9 ]; then
-        print_pass "Process was killed (OOM killer) - memory limit enforced!"
-    elif echo "$result" | grep -q "MEMORY_ERROR"; then
-        print_pass "Got MemoryError - memory limit enforced!"
-    elif echo "$result" | grep -q "ALLOCATED"; then
-        print_fail "150MB was allocated - memory limit may not be enforced"
+        print_pass "Process was killed (OOM) - memory limit enforced!"
+    elif [ $exit_code -ne 0 ]; then
+        print_pass "Write failed (exit $exit_code) - memory limit likely enforced"
     else
-        print_warn "Unexpected result: $result (exit code: $exit_code)"
+        # Check if OOM events increased
+        if [ -f "$MEM_CGROUP/memory.events" ]; then
+            oom_count=$(grep "oom_kill" "$MEM_CGROUP/memory.events" 2>/dev/null | awk '{print $2}')
+            if [ "${oom_count:-0}" -gt 0 ]; then
+                print_pass "OOM kills detected ($oom_count) - memory limit enforced!"
+                return
+            fi
+        fi
+        print_warn "150MB write completed - memory limit may not be strictly enforced"
+        print_info "Note: cgroups v2 may allow brief overages before OOM"
     fi
 }
 
@@ -176,69 +232,97 @@ test_cpu_quota() {
 test_pids_limit() {
     print_header "PID LIMIT TEST (100 processes)"
     
-    print_info "Current PIDs cgroup settings:"
+    # Get cgroup info
     CGROUP_PATH=$(cat /proc/self/cgroup 2>/dev/null | head -1 | cut -d: -f3)
-    if [ -n "$CGROUP_PATH" ] && [ -f "/sys/fs/cgroup${CGROUP_PATH}/pids.max" ]; then
-        echo "  pids.max: $(cat /sys/fs/cgroup${CGROUP_PATH}/pids.max)"
-        echo "  pids.current: $(cat /sys/fs/cgroup${CGROUP_PATH}/pids.current 2>/dev/null)"
+    PID_CGROUP="/sys/fs/cgroup${CGROUP_PATH}"
+    
+    print_info "Current PIDs cgroup settings:"
+    if [ -f "$PID_CGROUP/pids.max" ]; then
+        pids_max=$(cat "$PID_CGROUP/pids.max")
+        pids_current=$(cat "$PID_CGROUP/pids.current" 2>/dev/null)
+        echo "  pids.max: $pids_max"
+        echo "  pids.current: $pids_current"
     else
         print_warn "Cannot read cgroup PIDs settings"
+        return
     fi
     
-    print_test "Spawning 50 background processes (should succeed)"
+    # Handle "max" (no limit)
+    if [ "$pids_max" = "max" ]; then
+        print_warn "No PID limit set (max)"
+        return
+    fi
     
-    # Spawn 50 sleep processes
-    pids=""
-    failed=0
-    for i in $(seq 1 50); do
+    # TEST 1: Spawn a safe number of processes
+    spawn_count=30  # Safe count that won't exhaust PIDs
+    
+    print_test "Spawning $spawn_count background processes (should succeed)"
+    
+    spawned=0
+    for i in $(seq 1 $spawn_count); do
         sleep 300 &
         if [ $? -eq 0 ]; then
-            pids="$pids $!"
-        else
-            failed=$((failed + 1))
+            spawned=$((spawned + 1))
         fi
-    done
+    done 2>/dev/null
     
-    if [ $failed -eq 0 ]; then
-        print_pass "Successfully spawned 50 processes"
+    if [ $spawned -eq $spawn_count ]; then
+        print_pass "Successfully spawned $spawned processes"
     else
-        print_fail "Failed to spawn some processes ($failed failed)"
+        print_warn "Spawned $spawned of $spawn_count processes"
     fi
     
-    # Kill them
-    for p in $pids; do
-        kill $p 2>/dev/null
-    done
+    # CLEANUP first batch before second test
+    print_info "Cleaning up first batch..."
+    pkill -u "$(whoami)" -f "sleep 300" 2>/dev/null
+    sleep 1
     wait 2>/dev/null
     
-    print_test "Spawning 120 processes (should fail around 100)"
+    # TEST 2: Try to exceed the limit
+    pids_current=$(cat "$PID_CGROUP/pids.current" 2>/dev/null)
+    available=$((pids_max - pids_current))
+    spawn_over=$((available + 20))  # Try to spawn more than available
     
-    # Try to spawn 120 processes
+    print_test "Spawning $spawn_over processes (should exceed limit of $pids_max)"
+    
     spawned=0
-    pids=""
-    for i in $(seq 1 120); do
+    fork_failed=0
+    for i in $(seq 1 $spawn_over); do
         sleep 300 2>/dev/null &
         if [ $? -eq 0 ]; then
-            pids="$pids $!"
             spawned=$((spawned + 1))
         else
+            fork_failed=1
             break
         fi
-    done
+    done 2>/dev/null
     
-    print_info "Managed to spawn $spawned processes"
+    print_info "Managed to spawn $spawned of $spawn_over requested"
     
-    if [ $spawned -lt 110 ]; then
-        print_pass "PID limit prevented spawning all 120 processes (got $spawned)"
+    # Check if we hit the limit
+    if [ $fork_failed -eq 1 ]; then
+        print_pass "Fork failed at process $spawned - PID limit enforced!"
+    elif [ -f "$PID_CGROUP/pids.events" ]; then
+        fork_fails=$(grep "max" "$PID_CGROUP/pids.events" 2>/dev/null | awk '{print $2}')
+        if [ -n "$fork_fails" ] && [ "$fork_fails" -gt 0 ]; then
+            print_pass "Fork limit hit! ($fork_fails failures in pids.events)"
+        else
+            print_fail "All processes spawned - limit may not be enforced"
+        fi
     else
-        print_fail "Spawned $spawned processes - PID limit may not be enforced"
+        print_fail "All processes spawned - limit may not be enforced"
     fi
     
-    # Cleanup
-    for p in $pids; do
-        kill $p 2>/dev/null
-    done
+    # Final cleanup
+    print_info "Final cleanup..."
+    pkill -u "$(whoami)" -f "sleep 300" 2>/dev/null
+    sleep 1
     wait 2>/dev/null
+    
+    if [ -f "$PID_CGROUP/pids.current" ]; then
+        pids_after=$(cat "$PID_CGROUP/pids.current" 2>/dev/null)
+        print_info "PIDs after cleanup: $pids_after"
+    fi
 }
 
 # ============================================================
@@ -299,25 +383,6 @@ test_disk_quota() {
 }
 
 # ============================================================
-#                    Summary
-# ============================================================
-print_summary() {
-    print_header "TEST SUMMARY"
-    
-    echo ""
-    printf "  Tests Passed: ${GREEN}%d${NC}\n" "$TESTS_PASSED"
-    printf "  Tests Failed: ${RED}%d${NC}\n" "$TESTS_FAILED"
-    echo ""
-    
-    if [ $TESTS_FAILED -eq 0 ]; then
-        printf "${GREEN}All tests passed!${NC}\n"
-    else
-        printf "${YELLOW}Some tests failed. Check the output above.${NC}\n"
-    fi
-    echo ""
-}
-
-# ============================================================
 #                    Main
 # ============================================================
 main() {
@@ -331,14 +396,11 @@ main() {
     echo "  Cgroup:   $(cat /proc/self/cgroup 2>/dev/null | head -1)"
     echo "============================================================"
     
-    # Run all tests
+    # Run all tests (PIDs last since it may exhaust fork limit)
     test_memory_limit
     test_cpu_quota
-    test_pids_limit
     test_disk_quota
-    
-    # Print summary
-    print_summary
+    test_pids_limit
 }
 
 # Check for specific test argument

@@ -78,4 +78,8 @@ $ #/usr/bin/supervisord -c /etc/supervisord.conf
 # reboot
 $ reboot
 
+# test limits
+$ apk add gcc musl-dev
+$ ./test-limits.sh
+
 <!-- > /dev/null 2>&1 -->
