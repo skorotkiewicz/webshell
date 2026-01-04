@@ -13,20 +13,32 @@ POSTS_DIR = SOCIAL_DIR / "posts"
 USERS_FILE = SOCIAL_DIR / "users.json"
 USER = os.getenv("USER", "unknown")
 
-# Ensure storage exists
-SOCIAL_DIR.mkdir(parents=True, exist_ok=True)
-POSTS_DIR.mkdir(parents=True, exist_ok=True)
+# Ensure storage exists with proper permissions
+# Set umask to 0 so files are created with full permissions
+old_umask = os.umask(0)
+
+SOCIAL_DIR.mkdir(parents=True, exist_ok=True, mode=0o1777)
+POSTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o1777)
 if not USERS_FILE.exists():
-    USERS_FILE.write_text(json.dumps([USER]))
+    USERS_FILE.write_text(json.dumps([]))
+    os.chmod(USERS_FILE, 0o666)
+
+os.umask(old_umask)
 
 # Helper functions
 def load_users():
-    with USERS_FILE.open() as f:
-        return json.load(f)
+    try:
+        with USERS_FILE.open() as f:
+            return json.load(f)
+    except (PermissionError, json.JSONDecodeError):
+        return []
 
 def save_users(users):
-    with USERS_FILE.open("w") as f:
-        json.dump(users, f, indent=2)
+    try:
+        with USERS_FILE.open("w") as f:
+            json.dump(users, f, indent=2)
+    except PermissionError:
+        pass  # Can't write to file owned by another user
 
 def register_user(user):
     users = load_users()
@@ -44,7 +56,8 @@ def load_post(file):
         return json.load(f)
 
 def save_post(post, post_id=None):
-    if not post_id:
+    is_new = post_id is None
+    if is_new:
         # Calculate next PostID based on the number of posts
         post_files = get_post_files()
         post_id = str(len(post_files) + 1)
@@ -52,8 +65,16 @@ def save_post(post, post_id=None):
     else:
         post["id"] = post_id
 
-    with (POSTS_DIR / f"{post_id}.json").open("w") as f:
+    post_file = POSTS_DIR / f"{post_id}.json"
+    with post_file.open("w") as f:
         json.dump(post, f, indent=2)
+    
+    # Only chmod new files we created
+    if is_new:
+        try:
+            os.chmod(post_file, 0o666)
+        except PermissionError:
+            pass
     return post_id
 
 def get_post_by_id(post_id):

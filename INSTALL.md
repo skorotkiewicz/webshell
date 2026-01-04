@@ -101,6 +101,7 @@ rc-update add local default
 
 ```sh
 mkdir -p /shared-files && chmod 777 /shared-files
+# mkdir -p /var/social && chmod 1777 /var/social # Optional
 ```
 
 ## 8. Deploy Scripts
