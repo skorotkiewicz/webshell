@@ -82,4 +82,17 @@ $ reboot
 $ apk add gcc musl-dev
 $ ./test-limits.sh
 
+# disable ssh
+> block all outgoing ssh connections, but allow {USERNAME} to perform it.
+
+```
+apk del openssh-client
+apk add openssh-server
+rc-update add sshd default
+rc-service sshd start
+ 
+iptables -A OUTPUT -o eth0  -p tcp --destination-port 22 -m owner --uid-owner {USERNAME} -j ACCEPT
+iptables -A OUTPUT -o eth0 -p tcp --destination-port 22 -j DROP
+```
+
 <!-- > /dev/null 2>&1 -->
