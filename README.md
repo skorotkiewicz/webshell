@@ -10,10 +10,10 @@ WebShell provides browser-accessible shell sessions through [ttyd](https://githu
 
 ## Features
 
-- **🔐 User Isolation** — Each session runs as a separate Unix user
-- **📊 Resource Limits** — Memory (100MB), CPU (50%), PIDs (100), Disk (5MB)
-- **📁 Shared Files** — Collaborative workspace at `/shared-files`
-- **🖥️ Web Interface** — Access via `http://localhost:8080`
+- **User Isolation** — Each session runs as a separate Unix user
+- **Resource Limits** — Memory (100MB), CPU (50%), PIDs (100), Disk (5MB)
+- **Shared Files** — Collaborative workspace at `/shared-files`
+- **Web Interface** — Access via `http://localhost:8080`
 
 ## Setup
 
