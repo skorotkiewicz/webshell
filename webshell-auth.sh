@@ -172,9 +172,8 @@ handle_login() {
                 echo "                  Account Created!                          "
                 echo "============================================================"
                 printf "  Your User ID: %s\n" "$uuid"
-                echo "============================================================"
+                echo ""
                 echo "  [!] SAVE THIS ID - You need it to log in again!          "
-                echo "============================================================"
                 echo ""
                 export CLIENT_IP="$uuid"
                 return 0
