@@ -1,8 +1,27 @@
 # Installation Guide
 
-> Setting up WebShell on Alpine Linux with QEMU/KVM
+> Setting up WebShell on Alpine Linux
 
 ---
+
+## Quick Start with Vagrant (Recommended)
+
+```sh
+# Install vagrant-qemu plugin
+vagrant plugin install vagrant-qemu
+
+# Start WebShell
+vagrant up --provider qemu
+
+# Access WebShell at http://localhost:8080
+# SSH: vagrant ssh
+```
+
+That's it! 🎉
+
+---
+
+## Manual Installation (QEMU)
 
 ## 1. Create Virtual Disk
 

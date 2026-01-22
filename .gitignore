@@ -2,3 +2,4 @@
 WebShell
 bak
 *.qcow2
+.vagrant

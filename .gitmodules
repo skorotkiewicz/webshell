@@ -1,0 +1,3 @@
+[submodule "vagrant-qemu"]
+	path = vagrant-qemu
+	url = https://github.com/ppggff/vagrant-qemu
