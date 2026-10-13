@@ -118,11 +118,16 @@ set_quota user_test
             fake = Path(directory) / "qemu-system-x86_64"
             fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
             fake.chmod(0o755)
-            result = subprocess.run(["sh", str(ROOT / "qemu-os-virt/run.sh")],
+            repository = Path(directory) / "repository"
+            (repository / "qemu-os-virt").mkdir(parents=True)
+            (repository / "run.sh").write_bytes((ROOT / "run.sh").read_bytes())
+            (repository / "qemu-os-virt/run.sh").write_bytes((ROOT / "qemu-os-virt/run.sh").read_bytes())
+            (repository / "webshell.qcow2").write_bytes(b"test disk")
+            result = subprocess.run(["sh", str(repository / "qemu-os-virt/run.sh")],
                                     cwd=directory, text=True, capture_output=True, timeout=10,
                                     env=dict(os.environ, PATH=directory + ":" + os.environ["PATH"]))
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(f"file={ROOT}/webshell.qcow2,media=disk,if=virtio", result.stdout)
+            self.assertIn(f"file={repository}/webshell.qcow2,format=qcow2,if=virtio", result.stdout)
             self.assertIn("hostfwd=tcp:127.0.0.1:8080-:8080", result.stdout)
 
     def test_missing_cgroup_controllers_fail(self):
