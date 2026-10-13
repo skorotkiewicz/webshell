@@ -135,6 +135,7 @@ setup_cgroup() {
         printf '+%s\n' "$ctrl" > "$CGROUP_BASE/cgroup.subtree_control" || return 1
     done
     mkdir -p "$cgroup_path" || return 1
+    chmod 755 "$cgroup_path" || return 1
     # Missing controller files are errors, not ordinary files to create.
     for ctrl in memory.max memory.swap.max cpu.max pids.max cgroup.procs; do
         [ -f "$cgroup_path/$ctrl" ] || return 1

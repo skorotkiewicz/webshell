@@ -9,7 +9,7 @@ printf '%s\n' \
 apk update
 apk add ttyd shadow supervisor quota-tools python3 py3-passlib e2fsprogs-extra
 
-# Use external ext4 user quotas so no offline filesystem modification is needed.
+# shortcut: external ext4 quotas avoid offline edits but are deprecated; migrate before kernel support ends.
 python3 - <<'PY'
 from pathlib import Path
 path = Path('/etc/fstab')

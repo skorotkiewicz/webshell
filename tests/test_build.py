@@ -131,6 +131,23 @@ rc-update() {
         self.assertFalse((self.repository / "webshell.qcow2").exists())
         self.assertNotIn('"qemu-img"', self.calls.read_text())
 
+    def test_cached_base_is_verified_without_downloading(self):
+        (self.repository / ".alpine-3.23.4.qcow2").write_bytes(b"base image")
+        result = self.build()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line)[0] for line in self.calls.read_text().splitlines()]
+        self.assertNotIn("curl", calls)
+        self.assertIn("sha512sum", calls)
+
+    def test_bad_cached_checksum_does_not_publish(self):
+        (self.repository / ".alpine-3.23.4.qcow2").write_bytes(b"tampered image")
+        result = self.build(BAD_CHECKSUM="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.repository / "webshell.qcow2").exists())
+        calls = [json.loads(line)[0] for line in self.calls.read_text().splitlines()]
+        self.assertNotIn("curl", calls)
+        self.assertNotIn("qemu-img", calls)
+
     def test_guest_failure_does_not_publish(self):
         result = self.build(BAD_GUEST="1")
         self.assertNotEqual(result.returncode, 0)

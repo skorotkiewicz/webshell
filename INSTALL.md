@@ -1,111 +1,61 @@
-# Install on Alpine Linux
+# Build and run
 
-Run guest commands as root unless a step says host. This setup assumes an ext4 root filesystem on `/dev/vda3`; check your device before changing filesystem features. Keep the VM disk in the repository root.
+The build creates a ready-to-use Alpine WebShell VM. No manual installer, guest login or host root access is needed.
 
-## 1. Create and install the VM
+## Host requirements
 
-On the host, obtain an Alpine 3.23 virtual ISO, for example `curl -fL -o alpine.iso <official-ISO-URL>`.
+Use a Linux host with QEMU's x86_64 emulator, `qemu-img`, `curl`, Python 3, `ssh-keygen`, `sha512sum` and `mkisofs`. Allow 2 GiB of RAM for the guest. KVM is used when available; otherwise QEMU falls back to slower software emulation.
 
-```sh
-qemu-img create -f qcow2 webshell.qcow2 64G
-qemu-system-x86_64 \
-    -enable-kvm -m 2048 \
-    -nic user,model=virtio \
-    -drive file=webshell.qcow2,media=disk,if=virtio \
-    -cdrom alpine.iso
-```
-
-Install Alpine to the disk, enable SSH for administration, and configure a root password. Enable the matching `community` repository in `/etc/apk/repositories`.
-
-## 2. Enable quotas and cgroups
-
-For ext4 internal quotas, enable the quota feature while the installed root partition is **unmounted**, for example after booting the installer ISO again. Do not run `tune2fs` against an unknown or mounted device.
+On Debian or Ubuntu, install the host tools:
 
 ```sh
-apk add e2fsprogs-extra
-tune2fs -O quota -Q usrquota /dev/vda3
+sudo apt install qemu-system-x86 qemu-utils genisoimage curl python3 openssh-client
 ```
 
-Boot the installed system. Its root entry in `/etc/fstab` should use `usrquota`; do not mix internal quotas with the old `aquota.user` configuration:
+Other distributions provide `mkisofs` through `cdrtools` or `genisoimage`.
 
-```text
-/dev/vda3 / ext4 defaults,usrquota 0 1
-```
+## Build once
 
-Enable unified cgroups in `/etc/rc.conf`:
-
-```text
-rc_cgroup_mode="unified"
-```
-
-Install the guest packages.
+From the repository:
 
 ```sh
-apk update
-apk add \
-    ttyd shadow supervisor quota-tools python3 py3-passlib
-rc-update add cgroups default
-rc-service cgroups start
-quotaon -av
-quotaon -p /
-cat /sys/fs/cgroup/cgroup.controllers
+./build.sh 4G
 ```
 
-`quotaon -p /` must report user quotas are on. The controllers must include `memory cpu pids`. Reboot after filesystem or cgroup changes if needed.
+`4G` is the total virtual disk size, not RAM or each account's quota. Sizes are whole GiB, at least `2G`; omitting the argument uses `4G`. The sparse disk only consumes host space as data is written.
 
-Optional process privacy uses `proc /proc proc defaults,hidepid=2 0 0` in `/etc/fstab`. It does not isolate users from the guest kernel.
+The script downloads the official Alpine 3.23.4 BIOS cloud image and verifies its pinned SHA-512 checksum. The verified base is cached as `.alpine-3.23.4.qcow2`. It then creates a standalone disk, grows the root filesystem, installs WebShell and social, enables user disk quotas and unified cgroups, and configures key-only SSH administration.
 
-## 3. Start with local host forwarding
+A temporary cloud-init ISO provisions the VM. The guest reboots, checks its authentication helpers and HTTP service, disables cloud-init, and shuts down. Only a successful build publishes `webshell.qcow2`, `webshell-key` and `webshell-key.pub` in the repository root. The disk needs neither the base image nor the seed ISO to run.
 
-Shut down the guest, then run on the host:
+Existing disks or admin keys are never overwritten. To build another VM, move all three existing files aside first. Failed builds keep their files and `console.log` under the printed `.build.*` directory. Completed build files are retained too; the workspace disk and published disk are hard links to the same file, not independent backups.
+
+## Run
 
 ```sh
-sh qemu-os-virt/run.sh
-ssh root@localhost -p 10022
+./run.sh
 ```
 
-Ports 10022 and 8080 bind only to host localhost. For access from another computer, tunnel port 8080 over SSH rather than opening plain HTTP.
+Open http://localhost:8080. Type `new`, choose a password and save the account UUID. Accounts and home files persist across disconnects and reboots.
 
-## 4. Deploy
+The VM stays in the foreground. SSH and HTTP forwarding bind only to host localhost.
 
-From the repository on the host:
+For administration or a clean shutdown, use another terminal:
 
 ```sh
-scp -P 10022 webshell-auth.sh root@localhost:/usr/local/bin/webshell-auth.sh
-scp -P 10022 tools/social.py root@localhost:/usr/local/bin/social
-scp -P 10022 supervisord.conf root@localhost:/etc/supervisord.conf
-scp -P 10022 test-limits.sh root@localhost:/usr/local/bin/test-limits.sh
+ssh -i ./webshell-key -p 10022 root@localhost
+# Inside the guest:
+poweroff
 ```
 
-In the guest:
+There is no known root password; only the generated private key provides normal administrator access. Protect it, and back it up alongside the powered-off VM disk. Losing it requires offline recovery. Force-killing QEMU can lose recent writes.
 
-```sh
-chown root:root /usr/local/bin/webshell-auth.sh /usr/local/bin/social
-chmod 755 /usr/local/bin/webshell-auth.sh /usr/local/bin/social /usr/local/bin/test-limits.sh
-mkdir -p /shared-files /var/social /var/social/users
-chown root:root /shared-files /var/social /var/social/users
-chmod 1777 /shared-files
-chmod 755 /var/social /var/social/users
+## Check and upgrade
 
-cat > /etc/local.d/quotaon.start <<'EOF'
-#!/bin/sh
-quotaon -av
-EOF
-cat > /etc/local.d/supervisord.start <<'EOF'
-#!/bin/sh
-/usr/bin/supervisord -c /etc/supervisord.conf &
-EOF
-chmod 755 /etc/local.d/quotaon.start /etc/local.d/supervisord.start
-rc-update add local default
-reboot
-```
+Run `test-limits.sh` inside a WebShell user session to inspect its cgroup and disk quota settings. Per-account defaults are in `webshell-auth.sh`; update the test's expected values when changing them.
 
-Open http://localhost:8080, create an account, save the UUID, disconnect, and log in again. Check a saved file survives reconnecting and a VM reboot. Run `test-limits.sh` inside the user session.
+The image currently uses external ext4 user quotas. Alpine's kernel warns that these are deprecated, but the tested kernel enforces them. Migrate to internal quotas before upgrading to a kernel that removes external quota support.
 
-## Existing installations
+Updating repository scripts does not update an already-built disk. Back up the powered-off disk, then copy the changed scripts into the guest through SSH and reboot. Do not rebuild over permanent account data. Keep the guest packages patched with `apk upgrade` as administrator.
 
-Back up the powered-off VM disk before upgrading. Account names and password hashes are retained. Existing `.profile` files are no longer overwritten. Existing home permissions are retained; an administrator can set those account homes to mode 700 after checking they are real directories.
-
-Check `/shared-files`, `/var/social` and `/var/social/users` are real directories, not symlinks, before running the ownership commands above. The authentication script refuses non-root-owned shared parents rather than trusting user-created storage. Old social posts remain on disk but are not migrated. No account or home is automatically removed on failure.
-
-An interrupted signup may leave a locked Unix account that an administrator must inspect. Signup is not suitable for untrusted public access. Quotas cover only the root filesystem, not additional mounts such as tmpfs; memory-backed writes are subject to cgroup memory limits while allocated by that account.
+This is for a trusted small group, not untrusted public signup. For remote access, use an SSH tunnel or a TLS reverse proxy with access control. See [README.md](README.md) for the security boundary.

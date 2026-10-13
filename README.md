@@ -4,15 +4,18 @@ A browser terminal for a small group, running Alpine Linux inside QEMU. Accounts
 
 Type `new`, choose a password, and save the account UUID shown once at signup. Use that UUID and password to return to the same Unix account and home. Existing account UUIDs still work.
 
-## Run
+## Build and run
 
-Follow [INSTALL.md](INSTALL.md), then run from the repository:
+Install the host tools listed in [INSTALL.md](INSTALL.md), then:
 
 ```sh
-sh qemu-os-virt/run.sh
+./build.sh 4G
+./run.sh
 ```
 
-Open http://localhost:8080. SSH is forwarded to localhost:10022. Neither host port listens on the public network by default.
+The build downloads Alpine and configures everything automatically. `4G` is the VM disk size; the guest uses 2 GiB of RAM. Existing disks are never overwritten.
+
+Open http://localhost:8080. Admin access is `ssh -i ./webshell-key -p 10022 root@localhost`. Neither host port listens on the public network by default.
 
 ## Limits
 
@@ -47,7 +50,7 @@ For remote access, use an SSH tunnel or a TLS reverse proxy with access control.
 
 ```sh
 python3 -m unittest discover -s tests -v
-sh -n webshell-auth.sh test-limits.sh qemu-os-virt/run.sh
+sh -n build.sh run.sh webshell-auth.sh test-limits.sh tools/setup-vm.sh tools/start-webshell.sh
 ```
 
 Inside a deployed session, run `sh test-limits.sh` for read-only quota and cgroup checks. These verify configured values, not a stress test of kernel enforcement.

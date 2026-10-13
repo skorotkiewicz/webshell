@@ -119,11 +119,10 @@ set_quota user_test
             fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
             fake.chmod(0o755)
             repository = Path(directory) / "repository"
-            (repository / "qemu-os-virt").mkdir(parents=True)
+            repository.mkdir()
             (repository / "run.sh").write_bytes((ROOT / "run.sh").read_bytes())
-            (repository / "qemu-os-virt/run.sh").write_bytes((ROOT / "qemu-os-virt/run.sh").read_bytes())
             (repository / "webshell.qcow2").write_bytes(b"test disk")
-            result = subprocess.run(["sh", str(repository / "qemu-os-virt/run.sh")],
+            result = subprocess.run(["sh", str(repository / "run.sh")],
                                     cwd=directory, text=True, capture_output=True, timeout=10,
                                     env=dict(os.environ, PATH=directory + ":" + os.environ["PATH"]))
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -137,6 +136,19 @@ set_quota user_test
             result = shell('CGROUP_BASE="$BASE"; setup_cgroup test', BASE=directory)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((base / "webshell_test/memory.max").exists())
+
+    def test_account_cgroup_is_readable_under_private_umask(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "cgroup.controllers").write_text("memory cpu pids")
+            account = base / "webshell_test"
+            account.mkdir(mode=0o700)
+            for name in ("memory.max", "memory.swap.max", "cpu.max", "pids.max", "cgroup.procs"):
+                (account / name).write_text("")
+            result = shell('umask 077; CGROUP_BASE="$BASE"; setup_cgroup test', BASE=directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(account.stat().st_mode & 0o777, 0o755)
+            self.assertEqual((account / "memory.max").read_text().strip(), "104857600")
 
     def test_shared_symlink_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
