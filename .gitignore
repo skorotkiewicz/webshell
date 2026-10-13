@@ -2,3 +2,7 @@
 WebShell
 bak
 *.qcow2
+__pycache__
+.build.*
+webshell-key
+webshell-key.pub

@@ -1,392 +1,190 @@
 #!/bin/sh
 
-# ============================================================
-#          Alpine Web Shell - Authentication Script
-#          For Alpine Linux 3.23+ with cgroups v2
-# ============================================================
-
-# Configuration
+# Existing UUID -> username mapping is kept so permanent accounts still work.
 SHARED_DIR="/shared-files"
+SOCIAL_DIR="/var/social"
 CGROUP_BASE="/sys/fs/cgroup"
-MEMORY_LIMIT="104857600"  # 100MB in bytes
-CPU_QUOTA="50000 100000"  # 50ms per 100ms (50% CPU)
-PIDS_LIMIT="100"          # Max 100 processes
-DISK_QUOTA="5120"         # 5MB disk quota
+MEMORY_LIMIT="104857600"
+CPU_QUOTA="50000 100000"
+PIDS_LIMIT="100"
+DISK_QUOTA="5120"  # KiB, enforced on the root filesystem
+INODE_QUOTA="1024"
 
-# ============================================================
-#                     Helper Functions
-# ============================================================
-
-show_banner() {
-    clear 2>/dev/null || true
-    echo "============================================================"
-    echo "            Alpine Web Shell - Authentication               "
-    echo "============================================================"
-    echo "  * Type 'new' to create a new account                      "
-    echo "  * Enter your user ID to log in                            "
-    echo "============================================================"
-    echo ""
-}
-
-# Read password without echoing (works with ash)
 read_password() {
-    local prompt="$1"
-    local var_name="$2"
-    
-    printf "%s" "$prompt"
-    
-    # Disable echo
-    stty -echo 2>/dev/null
-    
-    # Read the password
-    read -r REPLY
-    
-    # Re-enable echo
-    stty echo 2>/dev/null
-    
-    # Print newline since echo was disabled
-    echo ""
-    
-    # Set the variable
-    eval "$var_name=\$REPLY"
+    local tty_state
+    tty_state=$(stty -g) || return 1
+    trap 'stty "$tty_state"; exit 1' HUP INT TERM
+    stty -echo || return 1
+    printf '%s' "$1"
+    IFS= read -r REPLY
+    local status=$?
+    stty "$tty_state"
+    trap - HUP INT TERM
+    printf '\n'
+    return "$status"
 }
 
 generate_username() {
-    local id="$1"
-    printf '%s' "$id" | md5sum | cut -c1-10 | xargs printf 'user_%s'
+    printf 'user_%s\n' "$(printf '%s' "$1" | md5sum | cut -c1-10)"
 }
 
-# Create a new user with password
-create_user() {
-    local username="$1"
-    local password="$2"
-    
-    # Create user with home directory and ash shell (Alpine default)
-    if ! adduser -D -h "/home/$username" -s /bin/ash "$username" 2>/dev/null; then
-        echo "Error: Failed to create user account."
-        return 1
-    fi
-    
-    # Set password using chpasswd
-    if ! printf '%s:%s\n' "$username" "$password" | chpasswd 2>/dev/null; then
-        echo "Error: Failed to set password."
-        deluser "$username" 2>/dev/null
-        rm -rf "/home/$username" 2>/dev/null
-        return 1
-    fi
-    
-    return 0
+valid_id() {
+    [ "${#1}" -eq 36 ] && printf '%s\n' "$1" |
+        grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 }
 
-# Verify user password using Python passlib
 verify_password() {
-    local username="$1"
-    local password="$2"
-    
-    # Get password hash from shadow file
     local hash
-    hash=$(getent shadow "$username" 2>/dev/null | cut -d: -f2)
-    
-    # Check if hash exists and is valid
-    if [ -z "$hash" ] || [ "$hash" = "!" ] || [ "$hash" = "*" ] || [ "$hash" = "!!" ]; then
-        return 1
-    fi
-    
-    # Verify using passlib - pass data via stdin to avoid shell escaping issues
-    python3 << PYTHON_EOF
+    hash=$(getent shadow "$1" | cut -d: -f2) || return 1
+    # Credentials are data on stdin, never Python source or command arguments.
+    printf '%s\n%s\n' "$hash" "$2" | python3 -I -c '
 import sys
 from passlib.hash import sha512_crypt
-
-password = '''$password'''
-hash_val = '''$hash'''
-
+hash_value, password = sys.stdin.read().split("\n", 2)[:2]
 try:
-    if sha512_crypt.verify(password, hash_val):
-        sys.exit(0)
-    else:
-        sys.exit(1)
-except Exception:
-    sys.exit(1)
-PYTHON_EOF
-    
-    return $?
+    valid = sha512_crypt.verify(password, hash_value)
+except (ValueError, TypeError):
+    valid = False
+sys.exit(0 if valid else 1)
+'
 }
 
-# ============================================================
-#                    Login Flow
-# ============================================================
+set_quota() {
+    # Fail closed if quotas are missing or disabled.
+    quotaon -p / 2>/dev/null | grep -Eq 'user quota.* is on' || return 1
+    setquota -u "$1" "$DISK_QUOTA" "$DISK_QUOTA" "$INODE_QUOTA" "$INODE_QUOTA" /
+}
+
+create_user() {
+    local username="$1" password="$2" home_dir="/home/$1"
+    [ ! -e "$home_dir" ] && [ ! -L "$home_dir" ] || return 1
+    adduser -D -h "$home_dir" -s /bin/ash "$username" || return 1
+    chmod 700 "$home_dir" || return 1
+    # Keep incomplete accounts locked. Do not remove homes or account data.
+    if ! set_quota "$username"; then
+        echo 'Account setup failed. Ask the administrator to check quotas.'
+        return 1
+    fi
+    # Drop privileges before touching files in a user-owned home.
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin su -s /bin/ash -c \
+        'umask 077; cat > "$HOME/.profile"' "$username" <<'PROFILE' || return 1
+export PATH="$HOME/bin:$PATH"
+PS1='\u@webshell:\w\$ '
+alias ll='ls -lah'
+printf '\nPermanent account: %s\n' "$(id -un)"
+printf 'Limits: 100 MiB RAM, half a CPU, 100 processes, 5 MiB disk.\n'
+printf 'Home is private. /shared-files is public. Run social for the local feed.\n\n'
+cd "$HOME"
+PROFILE
+    printf '%s:%s\n' "$username" "$password" | chpasswd -c SHA512
+}
 
 handle_login() {
-    show_banner
-    
+    printf '\nWebShell\nType new to create a permanent account, or enter your saved ID.\n\n'
     while true; do
-        printf "Enter user ID: "
-        read -r login_id
-        
-        # Validate input
-        if [ -z "$login_id" ]; then
-            echo "[!] Please enter a valid ID or 'new'."
-            echo ""
-            continue
-        fi
-        
-        if [ "$login_id" = "new" ]; then
-            # ─────────────────────────────────────────────
-            # New User Registration
-            # ─────────────────────────────────────────────
-            echo ""
-            echo "============================================================"
-            echo "                   Create New Account                       "
-            echo "============================================================"
-            
-            # Generate unique ID
-            uuid=$(cat /proc/sys/kernel/random/uuid)
+        printf 'User ID: '
+        IFS= read -r login_id || return 1
+        if [ "$login_id" = new ]; then
+            local uuid password
+            uuid=$(cat /proc/sys/kernel/random/uuid) || return 1
             USERNAME=$(generate_username "$uuid")
-            
-            # Check if user already exists (very unlikely with UUID)
-            if id "$USERNAME" >/dev/null 2>&1; then
-                echo "[!] Account collision. Please try again."
+            id "$USERNAME" >/dev/null 2>&1 && continue
+            read_password 'Password, at least 8 characters: ' || return 1
+            password=$REPLY
+            if [ "${#password}" -lt 8 ] || [ "${#password}" -gt 256 ]; then
+                echo 'Use 8 to 256 characters.'
+                unset password REPLY
                 continue
             fi
-            
-            # Get password (hidden input)
-            read_password "Enter password: " password
-            
-            if [ -z "$password" ]; then
-                echo "[!] Password cannot be empty."
+            read_password 'Confirm password: ' || return 1
+            if [ "$password" != "$REPLY" ]; then
+                echo 'Passwords do not match.'
+                unset password REPLY
                 continue
             fi
-            
-            read_password "Confirm password: " password_confirm
-            
-            if [ "$password" != "$password_confirm" ]; then
-                echo "[!] Passwords do not match."
-                continue
-            fi
-            
-            # Create the user
-            echo "Creating account..."
             if create_user "$USERNAME" "$password"; then
-                echo ""
-                echo "============================================================"
-                echo "                  Account Created!                          "
-                echo "============================================================"
-                printf "  Your User ID: %s\n" "$uuid"
-                echo ""
-                echo "  [!] SAVE THIS ID - You need it to log in again!          "
-                echo ""
-                export CLIENT_IP="$uuid"
+                unset password REPLY
+                printf '\nSave this ID. It is required for future logins:\n%s\n\n' "$uuid"
                 return 0
-            else
-                echo "[!] Account creation failed. Please try again."
-                continue
             fi
+            unset password REPLY
+            echo 'Account creation failed.'
         else
-            # ─────────────────────────────────────────────
-            # Existing User Login
-            # ─────────────────────────────────────────────
+            if ! valid_id "$login_id"; then
+                echo 'Enter a saved account UUID, or new.'
+                continue
+            fi
             USERNAME=$(generate_username "$login_id")
-            
-            # Check if user exists
-            if ! id "$USERNAME" >/dev/null 2>&1; then
-                echo "[!] User not found. Type 'new' to create an account."
-                echo ""
-                continue
-            fi
-            
-            # Get password (hidden input)
-            read_password "Enter password: " password
-            
-            if verify_password "$USERNAME" "$password"; then
-                echo "[+] Login successful!"
-                export CLIENT_IP="$login_id"
+            read_password 'Password: ' || return 1
+            if verify_password "$USERNAME" "$REPLY"; then
+                unset REPLY
                 return 0
-            else
-                echo "[!] Invalid password. Please try again."
-                echo ""
-                continue
             fi
+            unset REPLY
+            echo 'Invalid ID or password.'
+            sleep 2
         fi
     done
 }
 
-# ============================================================
-#                 Cgroups v2 Setup
-# ============================================================
-
-mount_cgroups() {
-    # Check if cgroup2 is already mounted
-    if mountpoint -q "$CGROUP_BASE" 2>/dev/null; then
-        # Check if it's cgroups v2
-        if [ -f "$CGROUP_BASE/cgroup.controllers" ]; then
-            return 0  # Already mounted as v2
-        fi
-    fi
-    
-    # Try to mount cgroups v2
-    mkdir -p "$CGROUP_BASE" 2>/dev/null
-    mount -t cgroup2 none "$CGROUP_BASE" 2>/dev/null || true
-    
-    # Verify mount
-    if [ -f "$CGROUP_BASE/cgroup.controllers" ]; then
-        return 0
-    fi
-    
-    return 1
-}
-
 setup_cgroup() {
-    local username="$1"
-    local cgroup_name="webshell_$username"
-    local cgroup_path="$CGROUP_BASE/$cgroup_name"
-    
-    # First ensure cgroups is mounted
-    if ! mount_cgroups; then
-        echo "[!] Warning: cgroups v2 not available, skipping resource limits"
-        return 1
-    fi
-    
-    # Enable controllers on the root cgroup
-    # Need to check which controllers are available
-    if [ -f "$CGROUP_BASE/cgroup.subtree_control" ]; then
-        # Enable available controllers
-        for ctrl in memory cpu pids; do
-            if grep -q "$ctrl" "$CGROUP_BASE/cgroup.controllers" 2>/dev/null; then
-                echo "+$ctrl" > "$CGROUP_BASE/cgroup.subtree_control" 2>/dev/null || true
-            fi
-        done
-    fi
-    
-    # Create cgroup directory
-    if [ ! -d "$cgroup_path" ]; then
-        mkdir -p "$cgroup_path" 2>/dev/null
-        if [ ! -d "$cgroup_path" ]; then
-            echo "[!] Warning: Could not create cgroup directory"
-            return 1
-        fi
-    fi
-    
-    # Set resource limits (only if files exist)
-    [ -f "$cgroup_path/memory.max" ] && echo "$MEMORY_LIMIT" > "$cgroup_path/memory.max" 2>/dev/null
-    [ -f "$cgroup_path/memory.swap.max" ] && echo "0" > "$cgroup_path/memory.swap.max" 2>/dev/null  # Disable swap
-    [ -f "$cgroup_path/cpu.max" ] && echo "$CPU_QUOTA" > "$cgroup_path/cpu.max" 2>/dev/null
-    [ -f "$cgroup_path/pids.max" ] && echo "$PIDS_LIMIT" > "$cgroup_path/pids.max" 2>/dev/null
-    
-    return 0
+    local cgroup_path="$CGROUP_BASE/webshell_$1" ctrl
+    [ -f "$CGROUP_BASE/cgroup.controllers" ] || return 1
+    for ctrl in memory cpu pids; do
+        grep -qw "$ctrl" "$CGROUP_BASE/cgroup.controllers" || return 1
+        printf '+%s\n' "$ctrl" > "$CGROUP_BASE/cgroup.subtree_control" || return 1
+    done
+    mkdir -p "$cgroup_path" || return 1
+    chmod 755 "$cgroup_path" || return 1
+    # Missing controller files are errors, not ordinary files to create.
+    for ctrl in memory.max memory.swap.max cpu.max pids.max cgroup.procs; do
+        [ -f "$cgroup_path/$ctrl" ] || return 1
+    done
+    printf '%s\n' "$MEMORY_LIMIT" > "$cgroup_path/memory.max" || return 1
+    printf '0\n' > "$cgroup_path/memory.swap.max" || return 1
+    printf '%s\n' "$CPU_QUOTA" > "$cgroup_path/cpu.max" || return 1
+    printf '%s\n' "$PIDS_LIMIT" > "$cgroup_path/pids.max" || return 1
 }
-
-# Add current process to cgroup
-join_cgroup() {
-    local username="$1"
-    local cgroup_name="webshell_$username"
-    local cgroup_path="$CGROUP_BASE/$cgroup_name"
-    
-    # Only join if cgroup exists
-    if [ -f "$cgroup_path/cgroup.procs" ]; then
-        echo $$ > "$cgroup_path/cgroup.procs" 2>/dev/null
-    fi
-}
-
-# ============================================================
-#               User Environment Setup
-# ============================================================
 
 setup_environment() {
     local username="$1"
-    local user_id="$2"
-    local home_dir="/home/$username"
-    
-    # Ensure shared directory exists with sticky bit
-    [ ! -d "$SHARED_DIR" ] && mkdir -p "$SHARED_DIR"
-    chmod 1777 "$SHARED_DIR" 2>/dev/null
-    
-    # Set disk quota if quota tools are available
-    if command -v setquota >/dev/null 2>&1; then
-        setquota -u "$username" "$DISK_QUOTA" "$DISK_QUOTA" 0 0 / 2>/dev/null || true
+    local directory
+    for directory in "$SHARED_DIR" "$SOCIAL_DIR" "$SOCIAL_DIR/users"; do
+        [ ! -L "$directory" ] || return 1
+        mkdir -p "$directory" || return 1
+        [ "$(stat -c %u "$directory")" = 0 ] || return 1
+        # Secure social parents before creating anything beneath them.
+        if [ "$directory" = "$SHARED_DIR" ]; then
+            chmod 1777 "$directory" || return 1
+        else
+            chmod 755 "$directory" || return 1
+        fi
+    done
+    # The parent is root-owned, so users cannot claim someone else's directory.
+    local user_dir="$SOCIAL_DIR/users/$username"
+    [ ! -L "$user_dir" ] || return 1
+    if [ ! -e "$user_dir" ]; then
+        mkdir -m 755 "$user_dir" || return 1
+        chown "$username:$username" "$user_dir" || return 1
     fi
-    
-    # Create user's .profile
-    cat > "$home_dir/.profile" << PROFILE_EOF
-# Alpine Web Shell Profile
-
-# Prompt with colors
-PS1='\[\033[01;32m\]\u@webshell\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
-
-# Environment
-export TERM=xterm-256color
-export PATH="\$HOME/bin:\$PATH"
-
-# Aliases
-alias ls='ls --color=auto'
-alias ll='ls -lah'
-alias la='ls -A'
-alias l='ls -CF'
-alias grep='grep --color=auto'
-
-# Welcome message
-echo "============================================================"
-echo "            Welcome to Alpine Web Shell!                    "
-echo "============================================================"
-echo ""
-echo "  User ID:   $user_id"
-echo "  Username:  $username"
-echo ""
-echo "  Resource Limits:"
-echo "    - Memory:    100MB"
-echo "    - CPU:       50%"
-echo "    - Processes: 100"
-echo "    - Disk:      5MB"
-echo ""
-echo "  Shared Files: /shared-files"
-echo "    - Create files here to share with others"
-echo "    - Only you can modify/delete your own files"
-echo ""
-echo "  Social: run 'social' to open the social interface"
-echo "    - Like, create posts and comments with others"
-echo ""
-echo "============================================================"
-echo ""
-
-# Start in shared directory
-cd /shared-files 2>/dev/null || cd ~
-PROFILE_EOF
-
-    chown "$username:$username" "$home_dir/.profile"
-    chmod 644 "$home_dir/.profile"
+    [ -d "$user_dir" ] && [ "$(stat -c %u "$user_dir")" = "$(id -u "$username")" ]
 }
-
-# ============================================================
-#                      Main Script
-# ============================================================
 
 main() {
-    # Check if already authenticated
-    if [ -z "$CLIENT_IP" ]; then
-        handle_login
-    fi
-    
-    # Derive username from client IP/ID
-    USERNAME=$(generate_username "$CLIENT_IP")
-    
-    # Verify user still exists
-    if ! id "$USERNAME" >/dev/null 2>&1; then
-        echo "Error: User session invalid. Please log in again."
-        unset CLIENT_IP
-        exec "$0"
-    fi
-    
-    # Setup cgroup resource limits (non-fatal if fails)
-    setup_cgroup "$USERNAME"
-    
-    # Setup user environment
-    setup_environment "$USERNAME" "$CLIENT_IP"
-    
-    # Join the cgroup before switching user
-    join_cgroup "$USERNAME"
-    
-    # Switch to user shell with profile loaded
-    exec su -l "$USERNAME"
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    [ "$(id -u)" -eq 0 ] || { echo 'This script must run as root through ttyd.'; return 1; }
+    umask 077
+    # CLIENT_IP is untrusted transport metadata, never an authentication token.
+    unset CLIENT_IP ENV BASH_ENV PYTHONPATH PYTHONHOME
+    handle_login || return 1
+    set_quota "$USERNAME" && setup_cgroup "$USERNAME" && setup_environment "$USERNAME" || {
+        echo 'Login refused: resource limits or shared storage are unavailable.'
+        return 1
+    }
+    printf '%s\n' "$$" > "$CGROUP_BASE/webshell_$USERNAME/cgroup.procs" || return 1
+    exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin TERM="${TERM:-xterm-256color}" su -l "$USERNAME"
 }
 
-# Run main
-main
+# Tests source a copy without this entry point.
+main "$@"

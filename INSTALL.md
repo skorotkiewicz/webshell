@@ -1,128 +1,63 @@
-# Installation Guide
+# Build and run
 
-> Setting up WebShell on Alpine Linux with QEMU/KVM
+The build creates a ready-to-use Alpine WebShell VM. No manual installer, guest login or host root access is needed.
 
----
+## Host requirements
 
-## 1. Create Virtual Disk
+Use a Linux host with QEMU's x86_64 emulator, `qemu-img`, `curl`, Python 3, `ssh-keygen`, `sha512sum` and `mkisofs`. Allow 2 GiB of RAM for the guest. KVM is used when available; otherwise QEMU falls back to slower software emulation.
 
-```sh
-qemu-img create -f qcow2 webshell.qcow2 64G
-```
-
-## 2. Install Alpine Linux
+On Debian or Ubuntu, install the host tools:
 
 ```sh
-qemu-system-x86_64 \
-    -enable-kvm \
-    -m 2048 \
-    -nic user,model=virtio \
-    -drive file=webshell.qcow2,media=disk,if=virtio \
-    -cdrom alpine-virt-3.23.2-x86_64.iso
+sudo apt install qemu-system-x86 qemu-utils genisoimage curl python3 openssh-client
 ```
 
-Complete the Alpine installer.
+Other distributions provide `mkisofs` through `cdrtools` or `genisoimage`.
 
-## 3. Enable Disk Quotas
+## Build once
 
-Before rebooting, enable quota support on the root partition:
+From the repository:
 
 ```sh
-apk add e2fsprogs-extra
-tune2fs -O quota /dev/vda3
+./build.sh 4G
 ```
 
-Verify quota is enabled:
+`4G` is the total virtual disk size, not RAM or each account's quota. Sizes are whole GiB, at least `2G`; omitting the argument uses `4G`. The sparse disk only consumes host space as data is written.
+
+The script downloads the official Alpine 3.23.4 BIOS cloud image and verifies its pinned SHA-512 checksum. The verified base is cached as `.alpine-3.23.4.qcow2`. It then creates a standalone disk, grows the root filesystem, installs WebShell and social, enables user disk quotas and unified cgroups, and configures key-only SSH administration.
+
+A temporary cloud-init ISO provisions the VM. The guest reboots, checks its authentication helpers and HTTP service, disables cloud-init, and shuts down. Only a successful build publishes `webshell.qcow2`, `webshell-key` and `webshell-key.pub` in the repository root. The disk needs neither the base image nor the seed ISO to run.
+
+Existing disks or admin keys are never overwritten. To build another VM, move all three existing files aside first. Failed builds keep their files and `console.log` under the printed `.build.*` directory. Completed build files are retained too; the workspace disk and published disk are hard links to the same file, not independent backups.
+
+## Run
 
 ```sh
-tune2fs -l /dev/vda3 | grep 'Filesystem features'
+./run.sh
 ```
 
-Edit `/etc/fstab`:
+Open http://localhost:8080. Type `new`, choose a password and save the account UUID. Accounts and home files persist across disconnects and reboots.
 
-```
-/dev/vda3   /   ext4    defaults,usrjquota=aquota.user,grpjquota=aquota.group,jqfmt=vfsv0    0 1
-proc /proc proc defaults,hidepid=2,gid=1001 0 0
-```
+The VM stays in the foreground. SSH and HTTP forwarding bind only to host localhost.
 
-Reboot, then shut down.
-
-## 4. Boot with SSH
+For administration or a clean shutdown, use another terminal:
 
 ```sh
-qemu-system-x86_64 \
-    -enable-kvm \
-    -m 2048 \
-    -nic user,model=virtio,hostfwd=tcp::10022-:22,hostfwd=tcp::8080-:8080 \
-    -drive file=webshell.qcow2,media=disk,if=virtio \
-    -display none
+ssh -i ./webshell-key -p 10022 root@localhost
+# Inside the guest:
+poweroff
 ```
 
-Connect via SSH:
+There is no known root password; only the generated private key provides normal administrator access. Protect it, and back it up alongside the powered-off VM disk. Losing it requires offline recovery. Force-killing QEMU can lose recent writes.
 
-```sh
-ssh root@localhost -p 10022
-```
+## Check and upgrade
 
-## 5. Install Packages
+Run `test-limits.sh` inside a WebShell user session to inspect its cgroup and disk quota settings. Per-account defaults are in `webshell-auth.sh`; update the test's expected values when changing them.
 
-```sh
-apk add nano
-nano /etc/apk/repositories # uncomment http://dl-cdn.alpinelinux.org/alpine/v3.23/community
+The image currently uses external ext4 user quotas. Alpine's kernel warns that these are deprecated, but the tested kernel enforces them. Migrate to internal quotas before upgrading to a kernel that removes external quota support.
 
-apk update && apk add --no-cache \
-    bash ttyd sudo shadow nginx supervisor \
-    curl nano vim libcgroup cgroup-tools \
-    quota-tools py3-passlib
-```
+Updating repository scripts does not update an already-built disk. Back up the powered-off disk, then copy the changed scripts into the guest through SSH and reboot. Do not rebuild over permanent account data. Keep the guest packages patched with `apk upgrade` as administrator.
 
-## 6. Configure Autostart
+For the root-only SSH and password-input fixes, install the updated `webshell-auth.sh` as `/usr/local/bin/webshell-auth.sh`, set `AllowUsers root` in `/etc/ssh/sshd_config.d/webshell.conf`, check with `sshd -t`, and reboot. Do not rerun `setup-vm.sh` on an existing disk.
 
-```sh
-# Quota
-cat > /etc/local.d/quotaon.start << 'EOF'
-#!/bin/sh
-quotaon -av
-EOF
-chmod +x /etc/local.d/quotaon.start
-
-# Supervisor
-cat > /etc/local.d/supervisord.start << 'EOF'
-#!/bin/sh
-/usr/bin/supervisord -c /etc/supervisord.conf &
-EOF
-chmod +x /etc/local.d/supervisord.start
-
-# Enable local scripts
-rc-update add local default
-```
-
-## 7. Create Shared Directory
-
-```sh
-mkdir -p /shared-files && chmod 777 /shared-files
-# mkdir -p /var/social && chmod 1777 /var/social # Optional
-```
-
-## 8. Deploy Scripts
-
-```sh
-# Copy webshell-auth.sh to the VM
-chmod +x /usr/local/bin/webshell-auth.sh
-
-# Copy supervisord.conf
-cp supervisord.conf /etc/supervisord.conf
-
-# Optional copy `tools/social.py` to the VM
-chmod +x /usr/local/bin/social
-```
-
-## 9. Reboot
-
-```sh
-reboot
-```
-
----
-
-WebShell is now available at **http://localhost:8080**
+This is for a trusted small group, not untrusted public signup. For remote access, use an SSH tunnel or a TLS reverse proxy with access control. See [README.md](README.md) for the security boundary.
