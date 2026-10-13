@@ -87,6 +87,14 @@ class BuildTests(unittest.TestCase):
         resize = next(call for call in calls if call[:2] == ["qemu-img", "resize"])
         self.assertEqual(resize[-1], "4G")
 
+    def test_ssh_admin_policy_allows_only_root(self):
+        setup = (ROOT / "tools/setup-vm.sh").read_text()
+        policy = setup.split("<<'SSH'\n", 1)[1].split("\nSSH\n", 1)[0].splitlines()
+        self.assertIn("AllowUsers root", policy)
+        self.assertIn("PermitRootLogin prohibit-password", policy)
+        self.assertIn("PasswordAuthentication no", policy)
+        self.assertIn("KbdInteractiveAuthentication no", policy)
+
     def test_cloud_services_are_removed_only_from_registered_runlevels(self):
         script = (ROOT / "tools/start-webshell.sh").read_text()
         start = script.index("    rc-update show |")

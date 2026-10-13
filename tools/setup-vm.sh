@@ -44,6 +44,7 @@ chmod 755 /var/social /var/social/users
 printf 'root:%s\n' "$(head -c 32 /dev/urandom | base64)" | chpasswd -c SHA512
 mkdir -p /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/webshell.conf <<'SSH'
+AllowUsers root
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no

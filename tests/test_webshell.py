@@ -4,9 +4,12 @@ import importlib.util
 import json
 import os
 import pwd
+import pty
+import select
 import subprocess
 import sys
 import tempfile
+import termios
 import types
 import unittest
 import uuid
@@ -76,6 +79,44 @@ verify_password user "$PASSWORD"
             result = shell(command, HASH=hashed, PASSWORD=candidate)
             self.assertEqual(result.returncode == 0, succeeds, result.stderr)
         self.assertNotEqual(shell(command, HASH="!", PASSWORD=password).returncode, 0)
+
+    def test_password_prompt_masks_input_and_restores_terminal(self):
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        # Slow setup exposes the race when input arrives immediately at the prompt.
+        command = '''
+stty() { if [ "$1" = -g ]; then sleep 0.3; fi; command stty "$@"; }
+read_password 'Password: ' || exit 1
+printf 'VALUE=%s\\n' "$REPLY"
+'''
+        process = subprocess.Popen(["sh", "-c", AUTH + "\n" + command],
+                                   stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            prompt = b""
+            while b"Password: " not in prompt:
+                self.assertTrue(select.select([process.stdout], [], [], 5)[0],
+                                "Password prompt did not arrive")
+                chunk = os.read(process.stdout.fileno(), 4096)
+                self.assertTrue(chunk, "Exited before password prompt")
+                prompt += chunk
+            self.assertFalse(termios.tcgetattr(slave)[3] & termios.ECHO,
+                             "Password echo is still enabled at the prompt")
+            password = b"  quotes''' $HOME \\  "
+            os.write(master, password + b"\n")
+            output, error = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, error)
+            self.assertIn(b"VALUE=" + password + b"\n", output)
+            self.assertFalse(select.select([master], [], [], 0.1)[0],
+                             "Password was echoed to the terminal")
+            self.assertEqual(termios.tcgetattr(slave), original)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+            process.stdout.close()
+            process.stderr.close()
+            os.close(master)
+            os.close(slave)
 
     def test_client_ip_cannot_bypass_login(self):
         result = shell('''

@@ -11,11 +11,11 @@ DISK_QUOTA="5120"  # KiB, enforced on the root filesystem
 INODE_QUOTA="1024"
 
 read_password() {
-    printf '%s' "$1"
     local tty_state
     tty_state=$(stty -g) || return 1
     trap 'stty "$tty_state"; exit 1' HUP INT TERM
     stty -echo || return 1
+    printf '%s' "$1"
     IFS= read -r REPLY
     local status=$?
     stty "$tty_state"

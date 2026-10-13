@@ -58,4 +58,6 @@ The image currently uses external ext4 user quotas. Alpine's kernel warns that t
 
 Updating repository scripts does not update an already-built disk. Back up the powered-off disk, then copy the changed scripts into the guest through SSH and reboot. Do not rebuild over permanent account data. Keep the guest packages patched with `apk upgrade` as administrator.
 
+For the root-only SSH and password-input fixes, install the updated `webshell-auth.sh` as `/usr/local/bin/webshell-auth.sh`, set `AllowUsers root` in `/etc/ssh/sshd_config.d/webshell.conf`, check with `sshd -t`, and reboot. Do not rerun `setup-vm.sh` on an existing disk.
+
 This is for a trusted small group, not untrusted public signup. For remote access, use an SSH tunnel or a TLS reverse proxy with access control. See [README.md](README.md) for the security boundary.
