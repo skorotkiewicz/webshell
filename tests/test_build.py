@@ -34,7 +34,7 @@ elif name == "ssh-keygen":
 elif name == "mkisofs":
     Path(args[args.index("-output") + 1]).write_bytes(b"seed")
 elif name == "qemu-system-x86_64":
-    print("WEBSHELL_BUILD_FAILED" if os.environ.get("BAD_GUEST") else "WEBSHELL_BUILD_READY")
+    print("WEBSHELL_BUILD_FAILED" if os.environ.get("BAD_GUEST") else " * Starting local ...WEBSHELL_BUILD_READY")
 '''
 
 
@@ -86,6 +86,26 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn("hostfwd", " ".join(qemu))
         resize = next(call for call in calls if call[:2] == ["qemu-img", "resize"])
         self.assertEqual(resize[-1], "4G")
+
+    def test_cloud_services_are_removed_only_from_registered_runlevels(self):
+        script = (ROOT / "tools/start-webshell.sh").read_text()
+        start = script.index("    rc-update show |")
+        end = script.index("        done", start) + len("        done")
+        mock = '''
+rc-update() {
+    if [ "$1" = show ]; then
+        printf 'cloud-init-local | boot\\ncloud-final | default boot\\nsshd | default\\n'
+    else
+        printf 'removed %s %s\\n' "$2" "$3"
+    fi
+}
+'''
+        result = subprocess.run(["sh", "-ec", mock + script[start:end]],
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["removed cloud-init-local boot",
+                                                     "removed cloud-final default",
+                                                     "removed cloud-final boot"])
 
     def test_existing_disk_is_never_overwritten(self):
         disk = self.repository / "webshell.qcow2"

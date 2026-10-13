@@ -34,8 +34,13 @@ for attempt in range(30):
 else:
     raise SystemExit('ttyd did not start.')
 PY
+    # The ready disk must boot independently of the temporary NoCloud seed.
+    rc-update show | awk '$1 ~ /^cloud-/ {for (i=3; i<=NF; i++) print $1, $i}' |
+        while read -r service runlevel; do
+            rc-update del "$service" "$runlevel"
+        done
     mv /var/lib/webshell/build-pending /var/lib/webshell/build-complete
-    echo WEBSHELL_BUILD_READY > /dev/ttyS0
+    printf '\nWEBSHELL_BUILD_READY\n' > /dev/ttyS0
     trap - EXIT
     poweroff
 fi

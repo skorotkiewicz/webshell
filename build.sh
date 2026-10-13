@@ -26,9 +26,14 @@ printf 'Build files and logs: %s\n' "$work"
 # Pin the official image and its SHA-512 digest for a reproducible base.
 url=https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.4-x86_64-bios-cloudinit-r0.qcow2
 checksum=05bd2071f54cb47307fd1f9ff99333b3426dafa7fea95253b1100119b4da537e5f415c369a7c74b8c4d11cc22db178e26f39ecb27b7757edbe25d19a9944f061
-curl -fL -o "$work/alpine.qcow2" "$url"
-printf '%s  %s\n' "$checksum" "$work/alpine.qcow2" | sha512sum -c -
-qemu-img convert -f qcow2 -O qcow2 "$work/alpine.qcow2" "$work/webshell.qcow2"
+base="$repository/.alpine-3.23.4.qcow2"
+if [ ! -f "$base" ]; then
+    curl -fL -o "$work/alpine.qcow2" "$url"
+    printf '%s  %s\n' "$checksum" "$work/alpine.qcow2" | sha512sum -c -
+    ln "$work/alpine.qcow2" "$base"
+fi
+printf '%s  %s\n' "$checksum" "$base" | sha512sum -c -
+qemu-img convert -f qcow2 -O qcow2 "$base" "$work/webshell.qcow2"
 qemu-img resize "$work/webshell.qcow2" "$size"
 ssh-keygen -q -t ed25519 -N '' -C webshell-admin -f "$work/admin-key"
 
@@ -79,7 +84,7 @@ trap 'kill "$vm_pid" 2>/dev/null || true; wait "$vm_pid" 2>/dev/null || true; ex
 status=0
 wait "$vm_pid" || status=$?
 trap - HUP INT TERM
-if [ "$status" -ne 0 ] || ! grep -q '^WEBSHELL_BUILD_READY' "$work/console.log"; then
+if [ "$status" -ne 0 ] || ! grep -q 'WEBSHELL_BUILD_READY' "$work/console.log"; then
     tail -n 60 "$work/console.log" >&2
     echo "Build failed. Full guest log: $work/console.log" >&2
     exit 1
