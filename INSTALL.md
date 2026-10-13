@@ -1,128 +1,111 @@
-# Installation Guide
+# Install on Alpine Linux
 
-> Setting up WebShell on Alpine Linux with QEMU/KVM
+Run guest commands as root unless a step says host. This setup assumes an ext4 root filesystem on `/dev/vda3`; check your device before changing filesystem features. Keep the VM disk in the repository root.
 
----
+## 1. Create and install the VM
 
-## 1. Create Virtual Disk
+On the host, obtain an Alpine 3.23 virtual ISO, for example `curl -fL -o alpine.iso <official-ISO-URL>`.
 
 ```sh
 qemu-img create -f qcow2 webshell.qcow2 64G
-```
-
-## 2. Install Alpine Linux
-
-```sh
 qemu-system-x86_64 \
-    -enable-kvm \
-    -m 2048 \
+    -enable-kvm -m 2048 \
     -nic user,model=virtio \
     -drive file=webshell.qcow2,media=disk,if=virtio \
-    -cdrom alpine-virt-3.23.2-x86_64.iso
+    -cdrom alpine.iso
 ```
 
-Complete the Alpine installer.
+Install Alpine to the disk, enable SSH for administration, and configure a root password. Enable the matching `community` repository in `/etc/apk/repositories`.
 
-## 3. Enable Disk Quotas
+## 2. Enable quotas and cgroups
 
-Before rebooting, enable quota support on the root partition:
+For ext4 internal quotas, enable the quota feature while the installed root partition is **unmounted**, for example after booting the installer ISO again. Do not run `tune2fs` against an unknown or mounted device.
 
 ```sh
 apk add e2fsprogs-extra
-tune2fs -O quota /dev/vda3
+tune2fs -O quota -Q usrquota /dev/vda3
 ```
 
-Verify quota is enabled:
+Boot the installed system. Its root entry in `/etc/fstab` should use `usrquota`; do not mix internal quotas with the old `aquota.user` configuration:
+
+```text
+/dev/vda3 / ext4 defaults,usrquota 0 1
+```
+
+Enable unified cgroups in `/etc/rc.conf`:
+
+```text
+rc_cgroup_mode="unified"
+```
+
+Install the guest packages.
 
 ```sh
-tune2fs -l /dev/vda3 | grep 'Filesystem features'
+apk update
+apk add \
+    ttyd shadow supervisor quota-tools python3 py3-passlib
+rc-update add cgroups default
+rc-service cgroups start
+quotaon -av
+quotaon -p /
+cat /sys/fs/cgroup/cgroup.controllers
 ```
 
-Edit `/etc/fstab`:
+`quotaon -p /` must report user quotas are on. The controllers must include `memory cpu pids`. Reboot after filesystem or cgroup changes if needed.
 
-```
-/dev/vda3   /   ext4    defaults,usrjquota=aquota.user,grpjquota=aquota.group,jqfmt=vfsv0    0 1
-proc /proc proc defaults,hidepid=2,gid=1001 0 0
-```
+Optional process privacy uses `proc /proc proc defaults,hidepid=2 0 0` in `/etc/fstab`. It does not isolate users from the guest kernel.
 
-Reboot, then shut down.
+## 3. Start with local host forwarding
 
-## 4. Boot with SSH
+Shut down the guest, then run on the host:
 
 ```sh
-qemu-system-x86_64 \
-    -enable-kvm \
-    -m 2048 \
-    -nic user,model=virtio,hostfwd=tcp::10022-:22,hostfwd=tcp::8080-:8080 \
-    -drive file=webshell.qcow2,media=disk,if=virtio \
-    -display none
-```
-
-Connect via SSH:
-
-```sh
+sh qemu-os-virt/run.sh
 ssh root@localhost -p 10022
 ```
 
-## 5. Install Packages
+Ports 10022 and 8080 bind only to host localhost. For access from another computer, tunnel port 8080 over SSH rather than opening plain HTTP.
+
+## 4. Deploy
+
+From the repository on the host:
 
 ```sh
-apk add nano
-nano /etc/apk/repositories # uncomment http://dl-cdn.alpinelinux.org/alpine/v3.23/community
-
-apk update && apk add --no-cache \
-    bash ttyd sudo shadow nginx supervisor \
-    curl nano vim libcgroup cgroup-tools \
-    quota-tools py3-passlib
+scp -P 10022 webshell-auth.sh root@localhost:/usr/local/bin/webshell-auth.sh
+scp -P 10022 tools/social.py root@localhost:/usr/local/bin/social
+scp -P 10022 supervisord.conf root@localhost:/etc/supervisord.conf
+scp -P 10022 test-limits.sh root@localhost:/usr/local/bin/test-limits.sh
 ```
 
-## 6. Configure Autostart
+In the guest:
 
 ```sh
-# Quota
-cat > /etc/local.d/quotaon.start << 'EOF'
+chown root:root /usr/local/bin/webshell-auth.sh /usr/local/bin/social
+chmod 755 /usr/local/bin/webshell-auth.sh /usr/local/bin/social /usr/local/bin/test-limits.sh
+mkdir -p /shared-files /var/social /var/social/users
+chown root:root /shared-files /var/social /var/social/users
+chmod 1777 /shared-files
+chmod 755 /var/social /var/social/users
+
+cat > /etc/local.d/quotaon.start <<'EOF'
 #!/bin/sh
 quotaon -av
 EOF
-chmod +x /etc/local.d/quotaon.start
-
-# Supervisor
-cat > /etc/local.d/supervisord.start << 'EOF'
+cat > /etc/local.d/supervisord.start <<'EOF'
 #!/bin/sh
 /usr/bin/supervisord -c /etc/supervisord.conf &
 EOF
-chmod +x /etc/local.d/supervisord.start
-
-# Enable local scripts
+chmod 755 /etc/local.d/quotaon.start /etc/local.d/supervisord.start
 rc-update add local default
-```
-
-## 7. Create Shared Directory
-
-```sh
-mkdir -p /shared-files && chmod 777 /shared-files
-# mkdir -p /var/social && chmod 1777 /var/social # Optional
-```
-
-## 8. Deploy Scripts
-
-```sh
-# Copy webshell-auth.sh to the VM
-chmod +x /usr/local/bin/webshell-auth.sh
-
-# Copy supervisord.conf
-cp supervisord.conf /etc/supervisord.conf
-
-# Optional copy `tools/social.py` to the VM
-chmod +x /usr/local/bin/social
-```
-
-## 9. Reboot
-
-```sh
 reboot
 ```
 
----
+Open http://localhost:8080, create an account, save the UUID, disconnect, and log in again. Check a saved file survives reconnecting and a VM reboot. Run `test-limits.sh` inside the user session.
 
-WebShell is now available at **http://localhost:8080**
+## Existing installations
+
+Back up the powered-off VM disk before upgrading. Account names and password hashes are retained. Existing `.profile` files are no longer overwritten. Existing home permissions are retained; an administrator can set those account homes to mode 700 after checking they are real directories.
+
+Check `/shared-files`, `/var/social` and `/var/social/users` are real directories, not symlinks, before running the ownership commands above. The authentication script refuses non-root-owned shared parents rather than trusting user-created storage. Old social posts remain on disk but are not migrated. No account or home is automatically removed on failure.
+
+An interrupted signup may leave a locked Unix account that an administrator must inspect. Signup is not suitable for untrusted public access. Quotas cover only the root filesystem, not additional mounts such as tmpfs; memory-backed writes are subject to cgroup memory limits while allocated by that account.
